@@ -96,6 +96,22 @@ describe("makePendingDevinProvider", () => {
       assert.ok(snapshot.models.some((m) => m.slug === "custom-devin-model"));
     }),
   );
+
+  it.effect("deduplicates custom models that match built-in model slugs", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* makePendingDevinProvider(
+        decodeDevinSettings({ customModels: ["kimi-k2.6", "swe-1.6", "unique-custom"] }),
+      );
+      assert.strictEqual(snapshot.models.length, 3);
+      const kimis = snapshot.models.filter((m) => m.slug === "kimi-k2.6");
+      assert.strictEqual(kimis.length, 1);
+      assert.strictEqual(kimis[0]!.isCustom, false);
+      const swes = snapshot.models.filter((m) => m.slug === "swe-1.6");
+      assert.strictEqual(swes.length, 1);
+      assert.strictEqual(swes[0]!.isCustom, false);
+      assert.ok(snapshot.models.some((m) => m.slug === "unique-custom" && m.isCustom));
+    }),
+  );
 });
 
 describe("checkDevinProviderStatus", () => {
@@ -137,6 +153,28 @@ describe("checkDevinProviderStatus", () => {
     ),
   );
 
+  it.effect("reports error when version probe returns a non-zero exit code", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* checkDevinProviderStatus(decodeDevinSettings({}));
+      assert.strictEqual(snapshot.installed, true);
+      assert.strictEqual(snapshot.status, "error");
+      assert.strictEqual(snapshot.auth.status, "unknown");
+      assert.include(snapshot.message ?? "", "failed");
+    }).pipe(
+      Effect.provide(
+        mockSpawnerLayer((_command, args) => {
+          if (args[0] === "version") {
+            return { stdout: "", stderr: "devin version failed", code: 1 };
+          }
+          if (args[0] === "auth" && args[1] === "status") {
+            return { stdout: JSON.stringify({ authenticated: true }) };
+          }
+          return { stdout: "" };
+        }),
+      ),
+    ),
+  );
+
   it.effect("reports unauthenticated when auth says not logged in", () =>
     Effect.gen(function* () {
       const snapshot = yield* checkDevinProviderStatus(decodeDevinSettings({}));
@@ -152,6 +190,29 @@ describe("checkDevinProviderStatus", () => {
           }
           if (args[0] === "auth" && args[1] === "status") {
             return { stdout: JSON.stringify({ authenticated: false }) };
+          }
+          return { stdout: "" };
+        }),
+      ),
+    ),
+  );
+
+  it.effect("reports unauthenticated when auth probe returns non-zero with invalid JSON", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* checkDevinProviderStatus(decodeDevinSettings({}));
+      assert.strictEqual(snapshot.installed, true);
+      assert.strictEqual(snapshot.version, "1.0.0");
+      assert.strictEqual(snapshot.status, "error");
+      assert.strictEqual(snapshot.auth.status, "unauthenticated");
+      assert.include(snapshot.message ?? "", "not authenticated");
+    }).pipe(
+      Effect.provide(
+        mockSpawnerLayer((_command, args) => {
+          if (args[0] === "version") {
+            return { stdout: "devin version 1.0.0\n" };
+          }
+          if (args[0] === "auth" && args[1] === "status") {
+            return { stdout: "not authenticated", stderr: "auth failed", code: 1 };
           }
           return { stdout: "" };
         }),

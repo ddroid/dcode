@@ -9,6 +9,7 @@ import {
   AUTH_PROBE_TIMEOUT_MS,
   DEFAULT_TIMEOUT_MS,
   buildServerProvider,
+  detailFromResult,
   extractAuthBoolean,
   isCommandMissingCause,
   parseGenericCliVersion,
@@ -155,6 +156,24 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
 
   const versionResult = versionProbe.success.value;
   const version = parseGenericCliVersion(`${versionResult.stdout}\n${versionResult.stderr}`);
+  if (versionResult.code !== 0) {
+    const detail = detailFromResult(versionResult);
+    return buildServerProvider({
+      presentation: DEVIN_PRESENTATION,
+      enabled: devinSettings.enabled,
+      checkedAt,
+      models: allModels,
+      probe: {
+        installed: true,
+        version,
+        status: "error",
+        auth: { status: "unknown" },
+        message: detail
+          ? `Devin CLI is installed but failed to run \`devin version\`. ${detail}`
+          : "Devin CLI is installed but failed to run `devin version`.",
+      },
+    });
+  }
 
   // Probe auth status
   const authProbe = yield* runDevinCommand(

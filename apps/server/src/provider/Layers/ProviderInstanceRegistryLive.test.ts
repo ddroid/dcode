@@ -228,6 +228,179 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
   );
 });
 
+describe("ProviderInstanceRegistryLive — multi-instance devin slice", () => {
+  const testLayer = ServerConfig.layerTest(process.cwd(), {
+    prefix: "provider-instance-registry-devin-test",
+  }).pipe(
+    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(TestHttpClientLive),
+    Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+  );
+
+  it.live("boots two independent devin instances with distinct settings and identities", () =>
+    Effect.gen(function* () {
+      const personalId = ProviderInstanceId.make("devin_personal");
+      const workId = ProviderInstanceId.make("devin_work");
+      const devinDriverKind = ProviderDriverKind.make("devin");
+
+      const configMap: ProviderInstanceConfigMap = {
+        [personalId]: {
+          driver: devinDriverKind,
+          displayName: "Devin (personal)",
+          accentColor: "#FF5733",
+          enabled: false,
+          environment: [{ name: "DEVIN_API_KEY", value: "personal-key", sensitive: true }],
+          config: makeDevinConfig({
+            binaryPath: "/opt/devin-personal/bin/devin",
+            configPath: "/home/julius/.config/devin-personal",
+            permissionMode: "auto",
+            customModels: ["personal-model"],
+          }),
+        },
+        [workId]: {
+          driver: devinDriverKind,
+          displayName: "Devin (work)",
+          accentColor: "#33FF57",
+          enabled: false,
+          environment: [{ name: "DEVIN_API_KEY", value: "work-key", sensitive: true }],
+          config: makeDevinConfig({
+            binaryPath: "/opt/devin-work/bin/devin",
+            configPath: "/home/julius/.config/devin-work",
+            permissionMode: "ask",
+            customModels: ["work-model"],
+          }),
+        },
+      };
+
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [DevinDriver],
+        configMap,
+      });
+
+      const instances = yield* registry.listInstances;
+      expect(instances.map((instance) => instance.instanceId).toSorted()).toEqual(
+        [personalId, workId].toSorted(),
+      );
+      expect(instances.every((instance) => instance.driverKind === devinDriverKind)).toBe(true);
+      expect(instances.map((instance) => instance.displayName).toSorted()).toEqual(
+        ["Devin (personal)", "Devin (work)"].toSorted(),
+      );
+      expect(instances.map((instance) => instance.accentColor).toSorted()).toEqual(
+        ["#33FF57", "#FF5733"].toSorted(),
+      );
+
+      // Each instance must be retrievable by id and carry its *own* closures.
+      const personal = yield* registry.getInstance(personalId);
+      const work = yield* registry.getInstance(workId);
+      expect(personal).toBeDefined();
+      expect(work).toBeDefined();
+      expect(personal!.adapter).not.toBe(work!.adapter);
+      expect(personal!.textGeneration).not.toBe(work!.textGeneration);
+      expect(personal!.snapshot).not.toBe(work!.snapshot);
+
+      // Snapshots identify themselves by instanceId + driver + continuation identity.
+      const personalSnapshot = yield* personal!.snapshot.getSnapshot;
+      expect(personalSnapshot.instanceId).toBe(personalId);
+      expect(personalSnapshot.driver).toBe(devinDriverKind);
+      expect(personalSnapshot.enabled).toBe(false);
+      expect(personalSnapshot.continuation?.groupKey).toBe(
+        `${devinDriverKind}:instance:${personalId}`,
+      );
+      // Pending snapshot includes built-in models plus custom models.
+      expect(personalSnapshot.models.some((m) => m.slug === "kimi-k2.6")).toBe(true);
+      expect(personalSnapshot.models.some((m) => m.slug === "swe-1.6")).toBe(true);
+      expect(personalSnapshot.models.some((m) => m.slug === "personal-model")).toBe(true);
+
+      const workSnapshot = yield* work!.snapshot.getSnapshot;
+      expect(workSnapshot.instanceId).toBe(workId);
+      expect(workSnapshot.driver).toBe(devinDriverKind);
+      expect(workSnapshot.enabled).toBe(false);
+      expect(workSnapshot.continuation?.groupKey).toBe(`${devinDriverKind}:instance:${workId}`);
+      expect(workSnapshot.models.some((m) => m.slug === "work-model")).toBe(true);
+
+      // Nothing goes to the unavailable bucket — both drivers are registered and valid.
+      const unavailable = yield* registry.listUnavailable;
+      expect(unavailable).toEqual([]);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.live(
+    "degrades gracefully when one devin instance references a missing binary while another is valid",
+    () =>
+      Effect.gen(function* () {
+        const brokenId = ProviderInstanceId.make("devin_broken");
+        const validId = ProviderInstanceId.make("devin_valid");
+        const codexId = ProviderInstanceId.make("codex_default");
+        const devinDriverKind = ProviderDriverKind.make("devin");
+        const codexDriverKind = ProviderDriverKind.make("codex");
+
+        const configMap: ProviderInstanceConfigMap = {
+          [brokenId]: {
+            driver: devinDriverKind,
+            displayName: "Devin (broken)",
+            enabled: true,
+            config: makeDevinConfig({
+              binaryPath: "/nonexistent/devin",
+            }),
+          },
+          [validId]: {
+            driver: devinDriverKind,
+            displayName: "Devin (valid)",
+            enabled: false,
+            config: makeDevinConfig({}),
+          },
+          [codexId]: {
+            driver: codexDriverKind,
+            displayName: "Codex",
+            enabled: false,
+            config: makeCodexConfig({}),
+          },
+        };
+
+        const { registry } = yield* makeProviderInstanceRegistry({
+          drivers: [DevinDriver, CodexDriver],
+          configMap,
+        });
+
+        // All three instances should materialize — none should crash the registry.
+        const unavailable = yield* registry.listUnavailable;
+        expect(unavailable).toEqual([]);
+
+        const instances = yield* registry.listInstances;
+        expect(instances).toHaveLength(3);
+        expect(instances.map((instance) => instance.instanceId).toSorted()).toEqual(
+          [brokenId, codexId, validId].toSorted(),
+        );
+
+        const broken = yield* registry.getInstance(brokenId);
+        const valid = yield* registry.getInstance(validId);
+        const codex = yield* registry.getInstance(codexId);
+        expect(broken).toBeDefined();
+        expect(valid).toBeDefined();
+        expect(codex).toBeDefined();
+
+        // The broken instance should have an error snapshot because the binary is missing.
+        const brokenSnapshot = yield* broken!.snapshot.getSnapshot;
+        expect(brokenSnapshot.instanceId).toBe(brokenId);
+        expect(brokenSnapshot.driver).toBe(devinDriverKind);
+        expect(brokenSnapshot.installed).toBe(false);
+        expect(brokenSnapshot.status).toBe("error");
+
+        // The valid instance should have a disabled snapshot.
+        const validSnapshot = yield* valid!.snapshot.getSnapshot;
+        expect(validSnapshot.instanceId).toBe(validId);
+        expect(validSnapshot.driver).toBe(devinDriverKind);
+        expect(validSnapshot.enabled).toBe(false);
+        expect(validSnapshot.status).toBe("disabled");
+
+        // Codex should be unaffected.
+        const codexSnapshot = yield* codex!.snapshot.getSnapshot;
+        expect(codexSnapshot.instanceId).toBe(codexId);
+        expect(codexSnapshot.driver).toBe(codexDriverKind);
+      }).pipe(Effect.provide(testLayer)),
+  );
+});
+
 describe("ProviderInstanceRegistryLive — all drivers slice", () => {
   // All four drivers need `NodeServices` (ChildProcessSpawner + FileSystem +
   // Path). `OpenCodeDriver.create` additionally yields `OpenCodeRuntime`
