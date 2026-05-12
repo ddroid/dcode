@@ -4,16 +4,11 @@
  *   - Snapshot probes `devin version` and `devin auth status`.
  *   - Maintenance is manual-only (no automated update command).
  *   - Sessions run through ACP-over-stdio via `devin acp`.
- *   - Text generation is stubbed out as unsupported.
+ *   - Text generation runs scoped ACP sessions and collects structured JSON output.
  *
  * @module provider/Drivers/DevinDriver
  */
-import {
-  DevinSettings,
-  ProviderDriverKind,
-  type ServerProvider,
-  TextGenerationError,
-} from "@t3tools/contracts";
+import { DevinSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -37,7 +32,7 @@ import {
   makeStaticProviderMaintenanceResolver,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
-import type { TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
+import { makeDevinTextGeneration } from "../../textGeneration/DevinTextGeneration.ts";
 
 const decodeDevinSettings = Schema.decodeSync(DevinSettings);
 
@@ -49,19 +44,6 @@ const UPDATE = makeStaticProviderMaintenanceResolver(
     packageName: null,
   }),
 );
-
-const unsupportedTextGenerationError = (operation: string) =>
-  new TextGenerationError({
-    operation,
-    detail: "Devin text generation is not yet supported.",
-  });
-
-const makeDevinTextGeneration = (): TextGenerationShape => ({
-  generateCommitMessage: () => Effect.fail(unsupportedTextGenerationError("generateCommitMessage")),
-  generatePrContent: () => Effect.fail(unsupportedTextGenerationError("generatePrContent")),
-  generateBranchName: () => Effect.fail(unsupportedTextGenerationError("generateBranchName")),
-  generateThreadTitle: () => Effect.fail(unsupportedTextGenerationError("generateThreadTitle")),
-});
 
 const withInstanceIdentity =
   (input: {
@@ -114,7 +96,7 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
         instanceId,
         environment: processEnv,
       });
-      const textGeneration = makeDevinTextGeneration();
+      const textGeneration = yield* makeDevinTextGeneration(effectiveConfig, processEnv);
 
       const checkProvider = checkDevinProviderStatus(effectiveConfig).pipe(
         Effect.map(stampIdentity),
